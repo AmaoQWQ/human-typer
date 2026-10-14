@@ -2,7 +2,7 @@
 
 在浏览器侧栏写草稿，逐字输入到你选择的网页位置。
 
-Human Typer 是一个 Manifest V3 浏览器扩展，提供毛玻璃侧栏、实时进度、暂停继续，以及随机停顿和临时错字修正。没有每日额度，也没有 2000 字限制。
+Human Typer 是一个 Manifest V3 浏览器扩展，提供毛玻璃侧栏、实时进度、暂停继续，以及随机停顿和临时错字修正。
 
 [下载 v1.5.0](https://github.com/AmaoQWQ/human-typer/releases/tag/v1.5.0) · [安装说明](INSTALL.md) · [MIT 许可证](LICENSE)
 
