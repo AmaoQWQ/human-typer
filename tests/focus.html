@@ -1,0 +1,111 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Human Typer 输入回归测试</title>
+<style>body{font:16px system-ui;padding:32px;background:#202023;color:#eee}textarea,div[contenteditable],iframe{display:block;margin:12px 0;padding:12px;min-width:440px}pre{white-space:pre-wrap;line-height:1.6}</style>
+<h1>Human Typer 输入回归测试</h1>
+<p>下方草稿使用独立 iframe，模拟点击浏览器侧栏后的焦点切换。</p>
+<textarea id="target" aria-label="网页文本框"></textarea>
+<div id="editable" contenteditable="true" aria-label="网页可编辑区域"></div>
+<iframe id="panel" title="独立侧栏草稿" srcdoc="<textarea autofocus>侧栏草稿</textarea>"></iframe>
+<button id="run">运行回归测试</button>
+<pre id="results">等待运行</pre>
+<script>
+const listeners = new Set(), messages = [];
+window.chrome = {runtime:{
+ sendMessage:async message => {messages.push(message);},
+ onMessage:{addListener:fn=>listeners.add(fn),removeListener:fn=>listeners.delete(fn)}
+}};
+function send(message) {return new Promise(resolve=>{for(const fn of listeners) fn(message,{},resolve);});}
+</script>
+<script src="../typing-behavior.js"></script>
+<script src="../content.js"></script>
+<script>
+const realTimer=window.setTimeout.bind(window);
+async function finish(id) {
+ const began=Date.now();
+ while(Date.now()-began<15000) {
+  const result=messages.find(m=>m.type==='HT_DOM_PROGRESS'&&m.runId===id&&!m.running);
+  if(result)return result;
+  await new Promise(r=>realTimer(r,10));
+ }
+ throw new Error('等待输入完成超时：'+id);
+}
+async function until(predicate) {
+ const began=Date.now();while(!predicate()) {if(Date.now()-began>3000)throw new Error('等待输入状态超时');await new Promise(r=>realTimer(r,1));}
+}
+function selectControl(value,start,end=start) {
+ const box=document.getElementById('target');box.value=value;box.focus();box.setSelectionRange(start,end);
+ box.dispatchEvent(new Event('select',{bubbles:true}));return box;
+}
+function sidebar() {document.getElementById('panel').contentDocument.querySelector('textarea').focus();document.getSelection().removeAllRanges();}
+function assert(value,message) {if(!value)throw new Error(message);}
+document.getElementById('run').onclick=async()=>{
+ document.getElementById('run').disabled=true;
+ const output=document.getElementById('results'),results=[];
+ const test=async(name,fn)=>{try{await fn();results.push('通过：'+name);}catch(e){results.push('失败：'+name+' / '+e.message);}output.textContent=results.join('\n');};
+ window.setTimeout=(fn,ms)=>realTimer(fn,Math.min(ms,1));
+ await test('文本框：点击独立草稿后恢复原光标',async()=>{
+  const box=selectControl('前文后文',2);sidebar();await send({type:'HT_DOM_START',runId:'caret',text:'中文',speed:100});
+  await finish('caret');assert(box.value==='前文中文后文',box.value);
+ });
+ await test('第二次 Start 从上次结束位置继续',async()=>{
+  sidebar();await send({type:'HT_DOM_START',runId:'again',text:'X',speed:100});await finish('again');
+  assert(document.getElementById('target').value==='前文中文X后文',document.getElementById('target').value);
+ });
+ await test('选中文字在恢复后正确替换',async()=>{
+  const box=selectControl('abcdef',2,4);sidebar();await send({type:'HT_DOM_START',runId:'replace',text:'中',speed:100});await finish('replace');assert(box.value==='ab中ef',box.value);
+ });
+ await test('可编辑区域：焦点和选区消失后恢复 Range',async()=>{
+  const editor=document.getElementById('editable');editor.textContent='abcd';editor.focus();
+  const range=document.createRange();range.setStart(editor.firstChild,2);range.collapse(true);
+  const selection=document.getSelection();selection.removeAllRanges();selection.addRange(range);
+  document.dispatchEvent(new Event('selectionchange'));sidebar();
+  await send({type:'HT_DOM_START',runId:'editable',text:'中文',speed:100});await finish('editable');assert(editor.textContent==='ab中文cd',editor.textContent);
+ });
+ await test('重新选择时清除旧目标',async()=>{
+  await send({type:'HT_ARM'});const result=await send({type:'HT_DOM_START',runId:'empty',text:'X'});assert(!result.ok,'不应继续使用旧目标');
+ });
+ await test('Stop 立即停止后续输入',async()=>{
+  const box=selectControl('',0);sidebar();await send({type:'HT_DOM_START',runId:'stop',text:'abcdef',speed:0});await send({type:'HT_DOM_STOP'});
+  const state=await finish('stop');assert(state.stopped&&state.completed<=1&&box.value==='abcdef'.slice(0,state.completed),JSON.stringify(state));
+ });
+ await test('Stop 会清理尚未纠正的模拟错字',async()=>{
+  const box=selectControl('',0);sidebar();const random=Math.random;Math.random=()=>0;window.setTimeout=realTimer;
+  try{await send({type:'HT_DOM_START',runId:'typo',text:'中文',humanMode:true,speed:0});await until(()=>box.value==='a');await send({type:'HT_DOM_STOP'});await finish('typo');assert(box.value==='','残留错字：'+box.value);}finally{Math.random=random;window.setTimeout=(fn,ms)=>realTimer(fn,Math.min(ms,1));}
+ });
+ await test('进度逐字更新，模拟错字不计入已输入字数',async()=>{
+  assert(JSON.stringify(messages.filter(m=>m.runId==='caret'&&m.running).map(m=>m.completed))==='[1,2]','应逐字更新');
+  assert(messages.filter(m=>m.runId==='typo').every(m=>m.completed===0),'临时错字不应计数');
+ });
+ await test('暂停冻结进度，继续从原位置输入而不重复',async()=>{
+  window.setTimeout=realTimer;const box=selectControl('前后',1);sidebar();
+  try{await send({type:'HT_DOM_START',runId:'paused',text:'中文AB',speed:100});await until(()=>box.value==='前中后');
+   const result=await send({type:'HT_DOM_PAUSE',runId:'paused',paused:true});assert(result.ok&&result.paused,'暂停未接受');
+   await new Promise(r=>realTimer(r,110));assert(box.value==='前中后','暂停时不应输入');sidebar();
+   await send({type:'HT_DOM_PAUSE',runId:'paused',paused:false});const state=await finish('paused');assert(box.value==='前中文AB后'&&state.completed===4,box.value);
+  }finally{window.setTimeout=(fn,ms)=>realTimer(fn,Math.min(ms,1));}
+ });
+ await test('错字出现时暂停，继续后先删除英文再输入中文',async()=>{
+  window.setTimeout=realTimer;const box=selectControl('',0);sidebar();const random=Math.random;Math.random=()=>0;
+  try{await send({type:'HT_DOM_START',runId:'paused-typo',text:'中',humanMode:true,speed:100});await until(()=>box.value==='a');
+   await send({type:'HT_DOM_PAUSE',runId:'paused-typo',paused:true});await new Promise(r=>realTimer(r,160));assert(box.value==='a','暂停期间不应删除或继续');
+   await send({type:'HT_DOM_PAUSE',runId:'paused-typo',paused:false});const state=await finish('paused-typo');assert(box.value==='中'&&state.completed===1,box.value);
+  }finally{Math.random=random;window.setTimeout=(fn,ms)=>realTimer(fn,Math.min(ms,1));}
+ });
+ await test('暂停期间停止，不再输入剩余文字',async()=>{
+  window.setTimeout=realTimer;const box=selectControl('',0);sidebar();
+  try{await send({type:'HT_DOM_START',runId:'paused-stop',text:'中文',speed:100});await until(()=>box.value==='中');
+   await send({type:'HT_DOM_PAUSE',runId:'paused-stop',paused:true});await send({type:'HT_DOM_STOP'});const state=await finish('paused-stop');assert(box.value==='中'&&state.stopped&&!state.paused,JSON.stringify(state));
+  }finally{window.setTimeout=(fn,ms)=>realTimer(fn,Math.min(ms,1));}
+ });
+ await test('超过 2000 字仍可完整输入（2105 字）',async()=>{
+  const box=selectControl('',0);sidebar();await send({type:'HT_DOM_START',runId:'unlimited',text:'中'.repeat(2105),speed:100});
+  const state=await finish('unlimited');assert(!state.error&&state.completed===2105&&box.value.length===2105,JSON.stringify(state));
+ });
+ await test('目标移除后显示错误',async()=>{
+  const box=selectControl('abc',1);sidebar();box.remove();const state=await send({type:'HT_DOM_START',runId:'removed',text:'X'});assert(!state.ok,'应拒绝移除的目标');
+ });
+ window.setTimeout=realTimer;
+ output.textContent=results.join('\n')+'\n\n'+results.filter(x=>x.startsWith('通过')).length+' / '+results.length+' 通过';
+};
+</script>

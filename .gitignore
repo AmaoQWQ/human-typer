@@ -1,0 +1,14 @@
+dist/
+proofs/
+design-system/
+.codex/
+.env
+.env.*
+*.pem
+*.key
+*.crx
+*.log
+node_modules/
+__pycache__/
+.DS_Store
+Thumbs.db
